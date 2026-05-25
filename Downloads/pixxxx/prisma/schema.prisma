@@ -1,0 +1,347 @@
+// pixxxx.de – Prisma Schema
+// Run: npx prisma generate && npx prisma db push
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────
+// USERS
+// ─────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(uuid())
+  username      String    @unique @db.VarChar(30)
+  email         String    @unique @db.VarChar(255)
+  emailVerified DateTime?
+  displayName   String    @db.VarChar(60)
+  bio           String?   @db.Text
+  avatarUrl     String?   @db.Text
+  city          String?   @db.VarChar(100)
+  countryCode   String?   @db.Char(2)
+  xpPoints      Int       @default(0)
+  gearJson      Json?     // { cameras: [], lenses: [], accessories: [] }
+  isVerified    Boolean   @default(false)
+  isPro         Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  photos        Photo[]
+  ratings       PhotoRating[]
+  likes         Like[]
+  comments      Comment[]
+  followers     Follow[]      @relation("Following")
+  following     Follow[]      @relation("Follower")
+  notifications Notification[]
+  jobPostings   Job[]
+  accounts      Account[]
+  sessions      Session[]
+  savedPhotos   SavedPhoto[]
+
+  @@index([countryCode])
+  @@index([createdAt])
+  @@map("users")
+}
+
+// NextAuth.js required models
+model Account {
+  id                String  @id @default(uuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ─────────────────────────────────────────────
+// PHOTOS
+// ─────────────────────────────────────────────
+
+enum PhotoCategory {
+  LANDSCAPE
+  PORTRAIT
+  STREET
+  ARCHITECTURE
+  WILDLIFE
+  ASTRO
+  MACRO
+  SPORT
+  TRAVEL
+  ABSTRACT
+}
+
+model Photo {
+  id           String        @id @default(uuid())
+  userId       String
+  title        String        @db.VarChar(120)
+  description  String?       @db.Text
+  r2Key        String        @db.Text   // Original in Cloudflare R2
+  thumbKey     String        @db.Text   // 800px thumbnail key
+  thumbSmKey   String?       @db.Text   // 400px micro-thumb key
+  width        Int
+  height       Int
+  fileSizeBytes Int?
+  mimeType     String        @db.VarChar(30)
+
+  // EXIF data (auto-extracted on upload)
+  camera       String?       @db.VarChar(80)
+  lens         String?       @db.VarChar(80)
+  aperture     Decimal?      @db.Decimal(4, 1)
+  shutterSpeed String?       @db.VarChar(20)
+  iso          Int?
+  focalLength  Int?
+  flashUsed    Boolean?
+  shotAt       DateTime?     // EXIF DateTimeOriginal
+
+  // Classification
+  category     PhotoCategory
+  tags         String[]
+  locationId   String?
+
+  // Cached counters (updated via triggers/jobs)
+  avgRating    Decimal       @default(0) @db.Decimal(3, 2)
+  ratingCount  Int           @default(0)
+  viewCount    Int           @default(0)
+  likeCount    Int           @default(0)
+  commentCount Int           @default(0)
+  saveCount    Int           @default(0)
+
+  isPublic     Boolean       @default(true)
+  isFeatured   Boolean       @default(false)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  // Relations
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  location     Location?     @relation(fields: [locationId], references: [id])
+  ratings      PhotoRating[]
+  likes        Like[]
+  comments     Comment[]
+  savedBy      SavedPhoto[]
+
+  @@index([userId])
+  @@index([category])
+  @@index([avgRating])
+  @@index([createdAt])
+  @@index([isFeatured])
+  @@map("photos")
+}
+
+// ─────────────────────────────────────────────
+// RATINGS (4 dimensions)
+// ─────────────────────────────────────────────
+
+model PhotoRating {
+  id          String   @id @default(uuid())
+  photoId     String
+  userId      String
+  composition Int      @db.SmallInt  // 1-5
+  light       Int      @db.SmallInt  // 1-5
+  technique   Int      @db.SmallInt  // 1-5
+  impact      Int      @db.SmallInt  // 1-5
+  createdAt   DateTime @default(now())
+
+  photo       Photo    @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([photoId, userId])  // one rating per user per photo
+  @@index([photoId])
+  @@map("photo_ratings")
+}
+
+// ─────────────────────────────────────────────
+// SOCIAL: LIKES, FOLLOWS, SAVES, COMMENTS
+// ─────────────────────────────────────────────
+
+model Like {
+  photoId   String
+  userId    String
+  createdAt DateTime @default(now())
+
+  photo     Photo    @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([photoId, userId])
+  @@map("likes")
+}
+
+model SavedPhoto {
+  photoId   String
+  userId    String
+  createdAt DateTime @default(now())
+
+  photo     Photo    @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([photoId, userId])
+  @@map("saved_photos")
+}
+
+model Follow {
+  followerId  String
+  followingId String
+  createdAt   DateTime @default(now())
+
+  follower    User     @relation("Follower", fields: [followerId], references: [id], onDelete: Cascade)
+  following   User     @relation("Following", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@id([followerId, followingId])
+  @@index([followingId])
+  @@map("follows")
+}
+
+model Comment {
+  id        String    @id @default(uuid())
+  photoId   String
+  userId    String
+  parentId  String?   // for replies
+  body      String    @db.Text
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  photo     Photo     @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent    Comment?  @relation("Replies", fields: [parentId], references: [id])
+  replies   Comment[] @relation("Replies")
+
+  @@index([photoId])
+  @@index([userId])
+  @@map("comments")
+}
+
+// ─────────────────────────────────────────────
+// LOCATIONS
+// ─────────────────────────────────────────────
+
+model Location {
+  id           String   @id @default(uuid())
+  name         String   @db.VarChar(100)
+  slug         String   @unique @db.VarChar(120)
+  lat          Decimal  @db.Decimal(9, 6)
+  lng          Decimal  @db.Decimal(9, 6)
+  countryCode  String   @db.Char(2)
+  region       String?  @db.VarChar(100)
+  description  String?  @db.Text
+  bestSeason   String?  @db.VarChar(50)
+  bestTime     String?  @db.VarChar(80)  // e.g. "Golden hour, 30min after sunrise"
+  accessNotes  String?  @db.Text
+  tags         String[]
+  avgRating    Decimal  @default(0) @db.Decimal(3, 2)
+  photoCount   Int      @default(0)
+  submittedBy  String
+  isApproved   Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  photos       Photo[]
+
+  @@index([countryCode])
+  @@index([lat, lng])
+  @@map("locations")
+}
+
+// ─────────────────────────────────────────────
+// JOBS
+// ─────────────────────────────────────────────
+
+enum JobType {
+  FREELANCE
+  FULLTIME
+  PROJECT
+  INTERNSHIP
+}
+
+model Job {
+  id          String   @id @default(uuid())
+  title       String   @db.VarChar(120)
+  company     String   @db.VarChar(100)
+  logoUrl     String?  @db.Text
+  type        JobType
+  city        String?  @db.VarChar(100)
+  countryCode String   @db.Char(2)
+  remote      Boolean  @default(false)
+  description String   @db.Text
+  payFrom     Int?
+  payTo       Int?
+  payUnit     String?  @db.VarChar(10) // day | month | year | project
+  skills      String[]
+  postedBy    String
+  isActive    Boolean  @default(true)
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+
+  poster      User     @relation(fields: [postedBy], references: [id])
+
+  @@index([countryCode])
+  @@index([type])
+  @@index([isActive, expiresAt])
+  @@map("jobs")
+}
+
+// ─────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────
+
+enum NotificationType {
+  LIKE
+  COMMENT
+  FOLLOW
+  RATING
+  MENTION
+  FEATURED
+  JOB_MATCH
+  SYSTEM
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  type      NotificationType
+  title     String           @db.VarChar(120)
+  body      String           @db.Text
+  linkUrl   String?          @db.Text
+  imageUrl  String?          @db.Text
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}
